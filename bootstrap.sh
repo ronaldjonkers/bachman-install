@@ -20,8 +20,14 @@
 # Alles staat in main(): bij `curl | bash` leest bash dan eerst het hele script voordat er iets
 # draait, en geen enkel commando kan de rest van het script van stdin opeten. Vragen gaan via
 # /dev/tty.
+#
+# Een Mac die al in gebruik is mag: apps en CLI's die er al staan (ook buiten Homebrew om) worden
+# overgeslagen, en optionele onderdelen (Chrome, 1Password) mogen mislukken zonder dat de
+# installatie stopt.
 
-set -euo pipefail
+# -E: de fouttrap geldt ook binnen functies (alles staat in main), zodat elke fout gemeld wordt.
+set -Eeuo pipefail
+export HOMEBREW_NO_ENV_HINTS=1
 
 main() {
 DRY_RUN=0
@@ -45,6 +51,8 @@ BACHMAN_REPO="${BACHMAN_REPO:-ronaldjonkers/Bachman}"
 # Overschrijfbaar voor tests met fakes; in productie de vaste paden.
 BREW_BIN="${BACHMAN_BREW_BIN:-/opt/homebrew/bin/brew}"
 TTY="${BACHMAN_TTY:-/dev/tty}"
+APP_DIRS="${BACHMAN_APP_DIRS:-/Applications:${HOME}/Applications}"
+SYSTEM_BIN_DIRS="${BACHMAN_SYSTEM_BIN_DIRS:-/opt/homebrew/bin:/usr/local/bin}"
 HOMEBREW_INSTALLER="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 CLT_PLACEHOLDER="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
 STEP_NO=0
@@ -93,9 +101,9 @@ for f in "${FORMULAE[@]}"; do
   brew_formula "$f"
 done
 
-step "Homebrew-casks: ${CASKS[*]}"
+step "Homebrew-casks (optioneel, mislukken stopt de installatie niet): ${CASKS[*]}"
 for c in "${CASKS[@]}"; do
-  brew_cask "$c"
+  brew_cask "$c" optioneel
 done
 
 # ---------------------------------------------------------------------------
@@ -121,25 +129,34 @@ fi
 
 # Claude Code: Homebrew-cask, https://code.claude.com/docs/en/setup ("brew install --cask claude-code")
 step "Agent-CLI claude (bron: https://code.claude.com/docs/en/setup)"
-brew_cask claude-code
-check_cli claude
+if system_cli claude; then
+  log "  claude: al aanwezig ($(system_cli_path claude))"
+else
+  brew_cask claude-code verplicht
+fi
+check_cli claude verplicht
 
 # Codex CLI: Homebrew-formule `codex`, https://learn.chatgpt.com/docs/codex/cli (tab Homebrew)
 step "Agent-CLI codex (bron: https://learn.chatgpt.com/docs/codex/cli)"
-brew_formula codex
-check_cli codex
+if system_cli codex; then
+  # Ook als cask geïnstalleerd: dan botst de formule met de bestaande binary.
+  log "  codex: al aanwezig ($(system_cli_path codex))"
+else
+  brew_formula codex optioneel
+fi
+check_cli codex optioneel
 
 # Kimi Code CLI: npm -g, https://www.kimi.com/code/docs/kimi-code-cli/guides/getting-started.html
 # ("npm install -g @moonshot-ai/kimi-code"; de curl-installer zet hem alleen in de eigen home)
 step "Agent-CLI kimi (bron: https://www.kimi.com/code/docs/kimi-code-cli/guides/getting-started.html)"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "  [dry-run] npm install -g @moonshot-ai/kimi-code (overgeslagen als 'kimi --version' al werkt)"
-elif have kimi; then
-  log "  kimi: al aanwezig"
+elif system_cli kimi; then
+  log "  kimi: al aanwezig ($(system_cli_path kimi))"
 else
-  run npm install -g @moonshot-ai/kimi-code
+  run npm install -g @moonshot-ai/kimi-code || log "  waarschuwing: kimi niet geïnstalleerd; later via de wizard (Later)"
 fi
-check_cli kimi
+check_cli kimi optioneel
 
 # ---------------------------------------------------------------------------
 GATEWAY_DEPLOY="${REPO_DIR}/target/gateway-deploy"
@@ -176,7 +193,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "  [dry-run] rustup target add wasm32-unknown-unknown"
   log "  [dry-run] cargo leptos build --project bachman-web --release"
 else
-  if cargo leptos --version 2>/dev/null | grep -q "0\.3\.11"; then
+  leptos_version="$(cargo leptos --version 2>/dev/null || true)"
+  if [[ "$leptos_version" == *"0.3.11"* ]]; then
     log "  cargo-leptos 0.3.11: al aanwezig"
   else
     run cargo install cargo-leptos --version 0.3.11 --locked
@@ -208,8 +226,10 @@ step "Controle: agent-CLI's werken als bachman-agent"
 for cli in claude codex kimi; do
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "  [dry-run] sudo -u bachman-agent -H ${cli} --version"
-  else
-    run sudo -u bachman-agent -H "$cli" --version
+  elif ! system_cli "$cli"; then
+    log "  waarschuwing: ${cli} staat niet systeembreed; bachman-agent kan hem niet starten"
+  elif ! run sudo -u bachman-agent -H "$(system_cli_path "$cli")" --version; then
+    log "  waarschuwing: ${cli} start niet als bachman-agent; de wizard laat zien wat er mist"
   fi
 done
 
@@ -367,38 +387,100 @@ ensure_brew() {
   log "  Homebrew: $(command -v brew)"
 }
 
-# brew_formula <naam>: installeert als hij ontbreekt.
+# brew_installed --formula|--cask <naam>. De lijst eerst in een variabele: `brew list | grep -q`
+# faalt onder pipefail zodra grep vroeg stopt (SIGPIPE), en dan leek alles te ontbreken.
+brew_installed() {
+  local list
+  list="$(brew list "$1" -1 2>/dev/null || true)"
+  grep -qx -- "$2" <<<"$list"
+}
+
+# brew_formula <naam> [verplicht|optioneel]: installeert als hij ontbreekt. Een optionele formule
+# die faalt geeft een waarschuwing.
 brew_formula() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "  [dry-run] brew install $1 (overgeslagen als al aanwezig)"
-  elif brew list --formula -1 2>/dev/null | grep -qx "$1"; then
+  elif brew_installed --formula "$1"; then
     log "  $1: al aanwezig"
+  elif [[ "${2:-verplicht}" == optioneel ]]; then
+    run brew install "$1" || log "  waarschuwing: $1 niet geïnstalleerd (optioneel), de installatie gaat door"
   else
     run brew install "$1"
   fi
 }
 
+# De app of binary die een cask neerzet. Staat die er al (bijvoorbeeld zelf gedownload), dan
+# weigert `brew install --cask`; dat is geen fout, het programma is er.
+cask_target() {
+  case "$1" in
+    1password) echo "app:1Password.app" ;;
+    google-chrome) echo "app:Google Chrome.app" ;;
+    1password-cli) echo "bin:op" ;;
+    claude-code) echo "bin:claude" ;;
+    *) echo "" ;;
+  esac
+}
+
+cask_present_outside_brew() {
+  local target d
+  target="$(cask_target "$1")"
+  case "$target" in
+    app:*)
+      local IFS=:
+      for d in $APP_DIRS; do
+        [[ -d "${d}/${target#app:}" ]] && return 0
+      done
+      return 1
+      ;;
+    bin:*) system_cli "${target#bin:}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# brew_cask <naam> [verplicht|optioneel]
 brew_cask() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "  [dry-run] brew install --cask $1 (overgeslagen als al aanwezig)"
-  elif brew list --cask -1 2>/dev/null | grep -qx "$1"; then
+  elif brew_installed --cask "$1"; then
     log "  $1: al aanwezig"
+  elif cask_present_outside_brew "$1"; then
+    log "  $1: al aanwezig (buiten Homebrew geïnstalleerd)"
+  elif [[ "${2:-verplicht}" == optioneel ]]; then
+    run brew install --cask "$1" || log "  waarschuwing: $1 niet geïnstalleerd (optioneel), de installatie gaat door"
   else
     run brew install --cask "$1"
   fi
 }
 
+# Systeembreed (Homebrew-prefix): alleen daar kan bachman-agent een CLI starten. Een kopie in
+# Ronalds eigen home telt niet mee.
+system_cli_path() {
+  local d IFS=:
+  for d in $SYSTEM_BIN_DIRS; do
+    if [[ -x "${d}/$1" ]]; then
+      echo "${d}/$1"
+      return 0
+    fi
+  done
+  return 1
+}
+
+system_cli() { system_cli_path "$1" >/dev/null; }
+
+# check_cli <commando> [verplicht|optioneel]
 check_cli() {
-  # $1 commando
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "  [dry-run] $1 --version"
     return 0
   fi
   hash -r
-  if have "$1"; then
-    log "  $1 --version: $("$1" --version 2>&1 | head -n 1)"
+  local path
+  if path="$(system_cli_path "$1")"; then
+    log "  $1 --version: $( { "$path" --version 2>&1 || true; } | head -n 1)"
+  elif [[ "${2:-verplicht}" == optioneel ]]; then
+    log "  waarschuwing: $1 niet systeembreed gevonden (optioneel); later via de wizard (Later)"
   else
-    fail "$1 niet gevonden na installatie; open een nieuwe terminal (PATH) en draai het script opnieuw"
+    fail "$1 niet gevonden in /opt/homebrew/bin of /usr/local/bin na installatie; draai het script opnieuw"
   fi
 }
 
