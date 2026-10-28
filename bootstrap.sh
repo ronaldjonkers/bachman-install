@@ -14,8 +14,8 @@
 # ~/bachman-bootstrap.log (nooit de setup-link). Met --dry-run wordt elke stap alleen geprint, ook
 # in de one-liner-modus:  curl -fsSL <url> | bash -s -- --dry-run
 #
-# Alles wordt systeembreed geïnstalleerd (Homebrew, npm -g via Homebrew-node), zodat ook de
-# gebruiker bachman-agent, die Ronalds home niet kan lezen, de agent-CLI's kan starten.
+# Bachman draait als de gebruiker die dit script start (ADR-023): geen eigen gebruikers. Een oude
+# installatie met de gebruikers bachman en bachman-agent ruimt het script na een vraag op.
 #
 # Alles staat in main(): bij `curl | bash` leest bash dan eerst het hele script voordat er iets
 # draait, en geen enkel commando kan de rest van het script van stdin opeten. Vragen gaan via
@@ -52,7 +52,8 @@ BACHMAN_REPO="${BACHMAN_REPO:-ronaldjonkers/Bachman}"
 BREW_BIN="${BACHMAN_BREW_BIN:-/opt/homebrew/bin/brew}"
 TTY="${BACHMAN_TTY:-/dev/tty}"
 APP_DIRS="${BACHMAN_APP_DIRS:-/Applications:${HOME}/Applications}"
-SYSTEM_BIN_DIRS="${BACHMAN_SYSTEM_BIN_DIRS:-/opt/homebrew/bin:/usr/local/bin}"
+SYSTEM_BIN_DIRS="${BACHMAN_SYSTEM_BIN_DIRS:-/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin}"
+LEGACY_PLIST="${BACHMAN_LEGACY_PLIST:-/Library/LaunchDaemons/nl.bachman.core.plist}"
 HOMEBREW_INSTALLER="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 CLT_PLACEHOLDER="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
 STEP_NO=0
@@ -125,7 +126,7 @@ fi
 # ---------------------------------------------------------------------------
 # Agent-CLI's, systeembreed. Methode volgens de officiële documentatie op 2026-10-27; elk blok
 # noemt de bron en controleert met --version. Geen installer-pipes naar een shell: alles via Homebrew of npm -g
-# (npm van de Homebrew-node, prefix /opt/homebrew), dus ook leesbaar voor bachman-agent.
+# (npm van de Homebrew-node, prefix /opt/homebrew). Een CLI in ~/.local/bin telt ook mee.
 
 # Claude Code: Homebrew-cask, https://code.claude.com/docs/en/setup ("brew install --cask claude-code")
 step "Agent-CLI claude (bron: https://code.claude.com/docs/en/setup)"
@@ -214,7 +215,27 @@ else
   run sudo brew services start tailscale || log "  waarschuwing: Tailscale-daemon niet gestart; later via de wizard (Later, Tailscale)"
 fi
 
-step "Installeren als root: sudo ./target/release/bachman install --repo \"${REPO_DIR}\" --no-setup-url"
+# Oude installatie met eigen gebruikers (voor ADR-023): die houdt poort 7420 bezet. Opruimen
+# verwijdert de gebruikers bachman en bachman-agent met hun thuismap, dus eerst vragen.
+step "Oude installatie met eigen gebruikers opruimen (alleen als die er is)"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  log "  [dry-run] als ${LEGACY_PLIST} bestaat: vragen, dan sudo ./target/release/bachman remove-legacy"
+elif [[ -e "$LEGACY_PLIST" ]]; then
+  say "Er staat nog een oude Bachman-installatie met de gebruikers bachman en bachman-agent."
+  say "Die wordt verwijderd, met hun thuismap (database en WhatsApp-koppeling van die installatie)."
+  say "Je config.toml en policy.toml in /opt/bachman blijven staan."
+  answer=""
+  read -r -p "Oude installatie opruimen? [j/N] " answer <"$TTY" || answer=""
+  if [[ "$answer" == [jJ]* ]]; then
+    run sudo ./target/release/bachman remove-legacy
+  else
+    fail "oude installatie niet opgeruimd; zonder opruimen kan Bachman niet onder jouw gebruiker draaien (docs/MANUAL-STEPS.md §15)"
+  fi
+else
+  log "  geen oude installatie gevonden"
+fi
+
+step "Installeren (sudo voor /opt/bachman en /usr/local/bin; alles draait als $(id -un)): sudo ./target/release/bachman install --repo \"${REPO_DIR}\" --no-setup-url"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "  [dry-run] sudo ./target/release/bachman install --repo ${REPO_DIR} --no-setup-url"
 else
@@ -222,29 +243,16 @@ else
   run sudo ./target/release/bachman install --repo "$REPO_DIR" --no-setup-url
 fi
 
-step "Controle: agent-CLI's werken als bachman-agent"
-for cli in claude codex kimi; do
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "  [dry-run] sudo -u bachman-agent -H ${cli} --version"
-  elif ! system_cli "$cli"; then
-    log "  waarschuwing: ${cli} staat niet systeembreed; bachman-agent kan hem niet starten"
-  # Vanuit / : bachman-agent mag Ronalds repo niet lezen, en claude (Bun) faalt dan met een
-  # misleidende melding over "max file descriptors".
-  elif ! (cd / && run sudo -u bachman-agent -H "$(system_cli_path "$cli")" --version); then
-    log "  waarschuwing: ${cli} start niet als bachman-agent; de wizard laat zien wat er mist"
-  fi
-done
-
 # ---------------------------------------------------------------------------
 # De setup-link bevat een eenmalig token (ADR-OLI-2): alleen naar de terminal en de browser,
 # nooit naar het log.
 step "Wizard openen op deze Mac (eenmalige setup-link, 24 uur geldig)"
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  log "  [dry-run] sudo /opt/bachman/bin/bachman setup-url (de link komt alleen in de terminal, niet in het log)"
+  log "  [dry-run] /opt/bachman/bin/bachman setup-url (de link komt alleen in de terminal, niet in het log)"
   log "  [dry-run] open http://127.0.0.1:7420/setup?token=<verborgen>"
 else
   setup_link=""
-  if setup_link="$(sudo /opt/bachman/bin/bachman setup-url)"; then
+  if setup_link="$(/opt/bachman/bin/bachman setup-url)"; then
     say ""
     say "Wizard op deze Mac (eenmalig, 24 uur geldig):"
     say "  ${setup_link}"
@@ -254,7 +262,7 @@ else
     waited=0
     until curl -s -o /dev/null --max-time 2 http://127.0.0.1:7420/api/health; do
       if [[ "$waited" -ge 60 ]]; then
-        log "  waarschuwing: de core antwoordt na 60 s nog niet op 127.0.0.1:7420; kijk in /Users/bachman/Library/Logs/Bachman/core.log (sudo)"
+        log "  waarschuwing: de core antwoordt na 60 s nog niet op 127.0.0.1:7420; kijk in ~/Library/Logs/Bachman/core.log"
         break
       fi
       sleep 2
@@ -271,19 +279,17 @@ fi
 
 step "WhatsApp koppelen"
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  log "  [dry-run] sudo /opt/bachman/bin/bachman whatsapp pair (QR in de terminal, alleen als dat commando bestaat; anders via de wizard)"
+  log "  [dry-run] /opt/bachman/bin/bachman whatsapp pair (QR in de terminal, alleen als dat commando bestaat; anders via de wizard)"
 elif /opt/bachman/bin/bachman whatsapp pair --help >/dev/null 2>&1; then
   say "WhatsApp koppelen. Scan de QR-code met WhatsApp op de telefoon met het Bachman-nummer (Gekoppelde apparaten, Apparaat koppelen)."
-  # De terminal van Ronald als stdin is bedoeld; sudo hoeft die niet te openen.
-  # shellcheck disable=SC2024
-  sudo /opt/bachman/bin/bachman whatsapp pair <"$TTY" || log "  waarschuwing: koppelen in de terminal mislukt; gebruik de wizard"
+  /opt/bachman/bin/bachman whatsapp pair <"$TTY" || log "  waarschuwing: koppelen in de terminal mislukt; gebruik de wizard"
 else
   log "  koppel WhatsApp in de wizard (stap WhatsApp)"
 fi
 
 log "bootstrap klaar (${STEP_NO} stappen). Log: ${LOG}"
 say "Nog nodig om te beginnen: GitHub, Claude Code, WhatsApp en Eigenaar in de wizard. Daarna meldt de wizard: Bachman kan aan de slag."
-say "'bachman' werkt nu zonder pad (/usr/local/bin/bachman), bijvoorbeeld: sudo bachman status, sudo bachman whatsapp pair, sudo bachman setup-url (nieuwe link)."
+say "'bachman' werkt nu zonder pad (/usr/local/bin/bachman), bijvoorbeeld: bachman status, bachman whatsapp pair, bachman setup-url (nieuwe link)."
 }
 
 # ---------------------------------------------------------------------------
@@ -468,8 +474,8 @@ brew_cask() {
   fi
 }
 
-# Systeembreed (Homebrew-prefix): alleen daar kan bachman-agent een CLI starten. Een kopie in
-# Ronalds eigen home telt niet mee.
+# Waar de agent-runs een CLI vinden: de Homebrew-prefix en ~/.local/bin (de PATH van
+# bachman-agent-exec).
 system_cli_path() {
   local d IFS=:
   for d in $SYSTEM_BIN_DIRS; do
