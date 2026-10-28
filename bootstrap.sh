@@ -273,7 +273,7 @@ step "WhatsApp koppelen"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "  [dry-run] sudo /opt/bachman/bin/bachman whatsapp pair (QR in de terminal, alleen als dat commando bestaat; anders via de wizard)"
 elif /opt/bachman/bin/bachman whatsapp pair --help >/dev/null 2>&1; then
-  say "WhatsApp koppelen. Ontbreekt je eigen nummer nog, dan vraagt de terminal dat eerst. Scan daarna de QR-code met WhatsApp op de telefoon met het Bachman-nummer (Gekoppelde apparaten, Apparaat koppelen)."
+  say "WhatsApp koppelen. Scan de QR-code met WhatsApp op de telefoon met het Bachman-nummer (Gekoppelde apparaten, Apparaat koppelen)."
   # De terminal van Ronald als stdin is bedoeld; sudo hoeft die niet te openen.
   # shellcheck disable=SC2024
   sudo /opt/bachman/bin/bachman whatsapp pair <"$TTY" || log "  waarschuwing: koppelen in de terminal mislukt; gebruik de wizard"
