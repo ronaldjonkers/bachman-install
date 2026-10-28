@@ -252,7 +252,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "  [dry-run] open http://127.0.0.1:7420/setup?token=<verborgen>"
 else
   setup_link=""
-  if setup_link="$(/opt/bachman/bin/bachman setup-url)"; then
+  # Alleen de regel met de link, voor het geval de CLI er iets anders bij zet.
+  if setup_link="$(/opt/bachman/bin/bachman setup-url | grep -E '^https?://' | tail -n 1)" && [[ -n "$setup_link" ]]; then
     say ""
     say "Wizard op deze Mac (eenmalig, 24 uur geldig):"
     say "  ${setup_link}"
