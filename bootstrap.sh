@@ -228,7 +228,9 @@ for cli in claude codex kimi; do
     log "  [dry-run] sudo -u bachman-agent -H ${cli} --version"
   elif ! system_cli "$cli"; then
     log "  waarschuwing: ${cli} staat niet systeembreed; bachman-agent kan hem niet starten"
-  elif ! run sudo -u bachman-agent -H "$(system_cli_path "$cli")" --version; then
+  # Vanuit / : bachman-agent mag Ronalds repo niet lezen, en claude (Bun) faalt dan met een
+  # misleidende melding over "max file descriptors".
+  elif ! (cd / && run sudo -u bachman-agent -H "$(system_cli_path "$cli")" --version); then
     log "  waarschuwing: ${cli} start niet als bachman-agent; de wizard laat zien wat er mist"
   fi
 done
@@ -247,7 +249,20 @@ else
     say "Wizard op deze Mac (eenmalig, 24 uur geldig):"
     say "  ${setup_link}"
     log "  setup-link getoond (niet gelogd)"
-    open "$setup_link" || log "  waarschuwing: browser niet geopend; open de link hierboven zelf"
+    # Eerst wachten tot de core antwoordt (elke HTTP-status telt), anders opent de browser op
+    # "kan geen verbinding maken".
+    waited=0
+    until curl -s -o /dev/null --max-time 2 http://127.0.0.1:7420/api/health; do
+      if [[ "$waited" -ge 60 ]]; then
+        log "  waarschuwing: de core antwoordt na 60 s nog niet op 127.0.0.1:7420; kijk in /Users/bachman/Library/Logs/Bachman/core.log (sudo)"
+        break
+      fi
+      sleep 2
+      waited=$((waited + 2))
+    done
+    if ! open "$setup_link" 2>>"$LOG" && ! open -a Safari "$setup_link" 2>>"$LOG"; then
+      log "  waarschuwing: browser niet geopend (zie de regels hierboven in ${LOG}); open de link hierboven zelf"
+    fi
   else
     log "  geen setup-link (wizard al klaar?); open de webinterface via Tailscale"
   fi
@@ -258,7 +273,7 @@ step "WhatsApp koppelen"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "  [dry-run] sudo /opt/bachman/bin/bachman whatsapp pair (QR in de terminal, alleen als dat commando bestaat; anders via de wizard)"
 elif /opt/bachman/bin/bachman whatsapp pair --help >/dev/null 2>&1; then
-  say "Scan de QR-code met WhatsApp op de telefoon met het Bachman-nummer (Gekoppelde apparaten, Apparaat koppelen)."
+  say "WhatsApp koppelen. Ontbreekt je eigen nummer nog, dan vraagt de terminal dat eerst. Scan daarna de QR-code met WhatsApp op de telefoon met het Bachman-nummer (Gekoppelde apparaten, Apparaat koppelen)."
   # De terminal van Ronald als stdin is bedoeld; sudo hoeft die niet te openen.
   # shellcheck disable=SC2024
   sudo /opt/bachman/bin/bachman whatsapp pair <"$TTY" || log "  waarschuwing: koppelen in de terminal mislukt; gebruik de wizard"
@@ -268,6 +283,7 @@ fi
 
 log "bootstrap klaar (${STEP_NO} stappen). Log: ${LOG}"
 say "Nog nodig om te beginnen: GitHub, Claude Code, WhatsApp en Eigenaar in de wizard. Daarna meldt de wizard: Bachman kan aan de slag."
+say "'bachman' werkt nu zonder pad (/usr/local/bin/bachman), bijvoorbeeld: sudo bachman status, sudo bachman whatsapp pair, sudo bachman setup-url (nieuwe link)."
 }
 
 # ---------------------------------------------------------------------------
